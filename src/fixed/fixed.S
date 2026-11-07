@@ -15,16 +15,38 @@
     .type   op1_asm, @function
     .align  2
 op1_asm:
-    sw      zero, 0(a2)
-    li      a0, 0
+    # Keep the pass count in t0.
+    li      t0, 0
+
+op1_loop:
+    # Stop when no carry remains.
+    beq     a1, zero, op1_done
+
+    # Compute the carry for the next pass.
+    and     t1, a0, a1
+    slli    t1, t1, 1
+
+    # Add without propagating carry.
+    xor     a0, a0, a1
+
+    # Update the carry and pass count.
+    mv      a1, t1
+    addi    t0, t0, 1
+
+    j       op1_loop
+
+op1_done:
+    # Store the number of passes.
+    sw      t0, 0(a2)
     ret
+
     .size   op1_asm, .-op1_asm
 
     .globl  op2_asm
     .type   op2_asm, @function
     .align  2
 op2_asm:
-    li      a0, 0
+    sub     a0, a0, a1
     ret
     .size   op2_asm, .-op2_asm
 

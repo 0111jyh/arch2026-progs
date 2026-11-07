@@ -3,17 +3,21 @@
 /* Dummies: every function returns 0. Replace with the real routines. */
 uint32_t op1(uint32_t a, uint32_t b, int *n)
 {
-    (void) a;
-    (void) b;
     *n = 0;
-    return 0;
+
+    while (b != 0u) {
+        uint32_t carry = (a & b) << 1;
+        a = a ^ b;
+        b = carry;
+        (*n)++;
+    }
+
+    return a;
 }
 
 uint32_t op2(uint32_t a, uint32_t b)
 {
-    (void) a;
-    (void) b;
-    return 0;
+    return a - b;
 }
 
 uint32_t op3(uint32_t a, uint32_t b)
