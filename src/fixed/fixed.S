@@ -15,28 +15,25 @@
     .type   op1_asm, @function
     .align  2
 op1_asm:
-    # Keep the pass count in t0.
     li      t0, 0
 
-op1_loop:
-    # Stop when no carry remains.
+    # Handle b = 0 without entering the loop.
     beq     a1, zero, op1_done
 
-    # Compute the carry for the next pass.
+op1_loop:
+    # Compute carry and XOR sum.
     and     t1, a0, a1
     slli    t1, t1, 1
-
-    # Add without propagating carry.
     xor     a0, a0, a1
 
-    # Update the carry and pass count.
+    # Update carry and count.
     mv      a1, t1
     addi    t0, t0, 1
 
-    j       op1_loop
+    # Continue only if carry remains.
+    bne     a1, zero, op1_loop
 
 op1_done:
-    # Store the number of passes.
     sw      t0, 0(a2)
     ret
 
@@ -73,7 +70,6 @@ q_mul_asm:
     mv      t2, a1
     li      t3, 0
     li      t4, 0
-    li      t5, 32
 
 qmul_loop:
     # Check the lowest multiplier bit.
@@ -96,8 +92,7 @@ qmul_shift:
 
     # Process the next multiplier bit.
     srli    t2, t2, 1
-    addi    t5, t5, -1
-    bne     t5, zero, qmul_loop
+    bne     t2, zero, qmul_loop
 
     # Correct for a negative signed multiplier.
     bge     a1, zero, qmul_round
