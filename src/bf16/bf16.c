@@ -122,6 +122,76 @@ uint16_t bf16_mul(uint16_t a, uint16_t b)
 
 uint16_t bf16_sqrt(uint16_t a)
 {
-    (void) a;
-    return 0;
+    uint32_t sign = a & 0x8000u;
+    uint32_t exponent = (a >> 7) & 0xFFu;
+    uint32_t fraction = a & 0x7Fu;
+
+    /* Handle NaN and infinity. */
+    if (exponent == 0xFFu) {
+        if (fraction != 0)
+            return a;
+
+        return sign ? 0x7FC0u : a;
+    }
+
+    /* Both signed zeros return positive zero. */
+    if ((a & 0x7FFFu) == 0)
+        return 0x0000u;
+
+    /* Negative nonzero values return quiet NaN. */
+    if (sign != 0)
+        return 0x7FC0u;
+
+    /* Denormal inputs return positive zero. */
+    if (exponent == 0)
+        return 0x0000u;
+
+    /* Extract the integer significand and actual exponent. */
+    uint32_t m = 128u + fraction;
+    int32_t e = (int32_t) exponent - 127;
+
+    /* Make the exponent even. */
+    if ((e & 1) != 0) {
+        m <<= 1;
+        e--;
+    }
+
+    int32_t result_exp = e / 2;
+
+    /* mid： 猜測 m的平方根 是多少 */
+    uint32_t low = 90;
+    uint32_t high = 256;
+    uint32_t root = 90;
+
+    while (low <= high) {
+        uint32_t mid = low + ((high - low) >> 1);
+        uint32_t square = (mid * mid) >> 7;
+
+        if (square <= m) {
+            root = mid;
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    /* Normalize the result significand. */
+    if (root >= 256u) {
+        root >>= 1;
+        result_exp++;
+    } else if (root < 128u) {
+        root <<= 1;
+        result_exp--;
+    }
+
+    int32_t stored_exp = result_exp + 127;
+
+    if (stored_exp >= 255)
+        return 0x7F80u;
+
+    if (stored_exp <= 0)
+        return 0x0000u;
+
+    /* Pack exponent and fraction into BF16. */
+    return (uint16_t) (((uint32_t) stored_exp << 7) | (root & 0x7Fu));
 }
