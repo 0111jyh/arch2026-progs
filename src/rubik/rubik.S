@@ -30,17 +30,17 @@ rubik_solve_asm:
     # DFS limit: 1..3
     # No recursion, mul, div or rem.
 
-    addi sp, sp, -208
+    addi sp, sp, -240
 
-    sw ra, 152(sp)
-    sw s0, 156(sp)
-    sw s1, 160(sp)
-    sw s2, 164(sp)
-    sw s3, 168(sp)
-    sw s4, 172(sp)
-    sw s5, 176(sp)
-    sw s6, 180(sp)
-    sw s7, 184(sp)
+    sw ra, 192(sp)
+    sw s0, 196(sp)
+    sw s1, 200(sp)
+    sw s2, 204(sp)
+    sw s3, 208(sp)
+    sw s4, 212(sp)
+    sw s5, 216(sp)
+    sw s6, 220(sp)
+    sw s7, 224(sp)
 
     mv s0, a1
     mv s1, a2
@@ -146,7 +146,7 @@ rubik_mod3_done:
     # Reconstruct move indices into path[] at sp + 80.
     mv a2, a0
     mv a0, sp
-    addi a1, sp, 80
+    addi a1, sp, 128
 
     call rubik_reconstruct_asm
 
@@ -165,7 +165,7 @@ rubik_start_search:
 
 rubik_new_limit:
     li s3, 0               # depth = 0
-    sb zero, 64(sp)        # next_move[0] = 0
+    sb zero, 112(sp)        # next_move[0] = 0
 
 # ------------------------------------------==
 # 4. Iterative DFS
@@ -176,7 +176,7 @@ rubik_dfs_loop:
     beq s3, s2, rubik_check_leaf
 
     # Read next_move[depth].
-    addi t0, sp, 64
+    addi t0, sp, 112
     add t0, t0, s3
     lbu s4, 0(t0)
 
@@ -214,7 +214,7 @@ rubik_face_ready:
     beqz s3, rubik_apply_move
 
     addi t0, s3, -1
-    addi t1, sp, 80
+    addi t1, sp, 128
     add t1, t1, t0
     lbu t2, 0(t1)          # previous move index
 
@@ -235,65 +235,32 @@ rubik_prev_face_ready:
 # 5. Apply selected move
 # ------------------------------------------==
 
+
+
 rubik_apply_move:
-    # Save move into path[depth].
-    addi t0, sp, 80
+    # Save the move index.
+    addi t0, sp, 128
     add t0, t0, s3
     sb s4, 0(t0)
 
-    # source = cube[depth]
+    # a0 = parent cube.
     slli t0, s3, 4
-    add s7, sp, t0
+    add a0, sp, t0
 
-rubik_turn_power_loop:
-    # Alternate scratch buffers.
-    addi t0, sp, 112
-    beq s7, t0, rubik_use_buffer_b
-
-    mv a1, t0
-    j rubik_call_turn
-
-rubik_use_buffer_b:
-    addi a1, sp, 128
-
-rubik_call_turn:
-    mv a0, s7
-    mv a2, s5
-
-    jal ra, rubik_turn_once
-
-    # rubik_turn_once preserves a1.
-    # It clobbers temporary registers.
-    mv s7, a1
-
-    addi s6, s6, -1
-    bnez s6, rubik_turn_power_loop
-
-    # Copy rotated cube to cube[depth + 1].
+    # a1 = child cube.
     addi t0, s3, 1
     slli t0, t0, 4
-    add t1, sp, t0
+    add a1, sp, t0
 
-    li t2, 0
-
-rubik_copy_cube:
-    li t3, 14
-    bge t2, t3, rubik_descend
-
-    add t4, s7, t2
-    lbu t5, 0(t4)
-
-    add t6, t1, t2
-    sb t5, 0(t6)
-
-    addi t2, t2, 1
-    j rubik_copy_cube
+    # a2 = move index (0..8).
+    mv a2, s4
+    jal ra, rubik_turn_move
 
 rubik_descend:
     addi s3, s3, 1
 
     # New level begins with move 0.
-    addi t0, sp, 64
+    addi t0, sp, 112
     add t0, t0, s3
     sb zero, 0(t0)
 
@@ -303,29 +270,44 @@ rubik_descend:
 # 6. Check leaf state
 # ------------------------------------------==
 
+
 rubik_check_leaf:
-    # cube pointer = sp + depth * 16
+    # Calculate the address of cube[depth].
     slli t0, s3, 4
-    add t1, sp, t0
+    add a0, sp, t0
 
-    li t2, 0
+    # Encode the current cube as a State ID.
+    call rubik_encode_state
 
-rubik_check_leaf_loop:
-    li t3, 7
-    bge t2, t3, rubik_search_found
+    # Look up its shortest distance to Solved.
+    call rubik_lookup_depth5_asm
 
-    add t4, t1, t2
+    # Accept only states with distance exactly 5.
+    li t0, 5
+    bne a0, t0, rubik_backtrack
 
-    # p[i] == i?
-    lbu t5, 0(t4)
-    bne t5, t2, rubik_backtrack
+    # Found a path with total length depth + 5.
+    # Reconstruct the final five moves.
+    slli t0, s3, 4
+    add a0, sp, t0
 
-    # o[i] == 0?
-    lbu t5, 7(t4)
-    bnez t5, rubik_backtrack
+    addi a1, sp, 128
+    add a1, a1, s3
 
-    addi t2, t2, 1
-    j rubik_check_leaf_loop
+    li a2, 5
+    call rubik_reconstruct_asm
+
+    # A valid reconstruction must return five moves.
+    li t0, 5
+    bne a0, t0, rubik_backtrack
+
+    # s2 originally stores DFS limit.
+    # Now it stores the complete solution length.
+    addi s2, s3, 5
+
+    # path[] now holds:
+    # [DFS prefix moves][five reconstructed moves]
+    j rubik_search_found
 
 # ------------------------------------------==
 # 7. Backtracking
@@ -340,7 +322,7 @@ rubik_backtrack:
 rubik_increase_limit:
     addi s2, s2, 1
 
-    li t0, 3
+    li t0, 6
     bge t0, s2, rubik_new_limit
 
     # Depth > 3 not implemented yet.
@@ -360,7 +342,7 @@ rubik_search_found:
 rubik_count_loop:
     bge t0, s2, rubik_capacity_check
 
-    addi t1, sp, 80
+    addi t1, sp, 128
     add t1, t1, t0
     lbu t2, 0(t1)
 
@@ -406,7 +388,7 @@ rubik_output_loop:
     addi t6, t6, 1
 
 rubik_output_name:
-    addi t1, sp, 80
+    addi t1, sp, 128
     add t1, t1, t0
     lbu t2, 0(t1)
 
@@ -461,17 +443,17 @@ rubik_invalid:
     li a0, -1
 
 rubik_return:
-    lw ra, 152(sp)
-    lw s0, 156(sp)
-    lw s1, 160(sp)
-    lw s2, 164(sp)
-    lw s3, 168(sp)
-    lw s4, 172(sp)
-    lw s5, 176(sp)
-    lw s6, 180(sp)
-    lw s7, 184(sp)
+    lw ra, 192(sp)
+    lw s0, 196(sp)
+    lw s1, 200(sp)
+    lw s2, 204(sp)
+    lw s3, 208(sp)
+    lw s4, 212(sp)
+    lw s5, 216(sp)
+    lw s6, 220(sp)
+    lw s7, 224(sp)
 
-    addi sp, sp, 208
+    addi sp, sp, 240
     ret
 
     .size rubik_solve_asm, .-rubik_solve_asm
@@ -548,6 +530,87 @@ rubik_turn_done:
     .size rubik_turn_once, .-rubik_turn_once
 
 
+
+    .type rubik_turn_move, @function
+    .align 2
+
+
+rubik_turn_move:
+    # Table offset = move index * 7.
+    slli t0, a2, 3
+    sub t0, t0, a2
+
+    la t1, rubik_move_source
+    add t1, t1, t0
+
+    la t2, rubik_move_twist
+    add t2, t2, t0
+
+    # Exactly seven cubies.
+    # Expand at assembly time.
+    .rept 7
+        # Read source cubie index.
+        lbu t4, 0(t1)
+        add a3, a0, t4
+
+        # Copy permutation.
+        lbu t5, 0(a3)
+        sb t5, 0(a1)
+
+        # Transform orientation.
+        lbu t5, 7(a3)
+        lbu t6, 0(t2)
+        add t5, t5, t6
+
+        # Modulo 3.
+        sltiu a4, t5, 3
+        bnez a4, 1f
+        addi t5, t5, -3
+
+1:
+        sb t5, 7(a1)
+
+        # Advance to next cubie.
+        addi t1, t1, 1
+        addi t2, t2, 1
+        addi a1, a1, 1
+    .endr
+
+    ret
+
+    .size rubik_turn_move, .-rubik_turn_move
+
+
+rubik_move_loop:
+    lbu t4, 0(t1)
+    add a3, a0, t4
+
+    # Permutation.
+    lbu t5, 0(a3)
+    sb t5, 0(a1)
+
+    # Orientation.
+    lbu t5, 7(a3)
+    lbu t6, 0(t2)
+    add t5, t5, t6
+
+    sltiu a4, t5, 3
+    bnez a4, rubik_move_store
+    addi t5, t5, -3
+
+rubik_move_store:
+    sb t5, 7(a1)
+
+    addi t1, t1, 1
+    addi t2, t2, 1
+    addi a1, a1, 1
+
+    addi t3, t3, -1
+    bnez t3, rubik_move_loop
+    ret
+
+    .size rubik_turn_move, .-rubik_turn_move
+
     .globl rubik_encode_state
     .type rubik_encode_state, @function
     .align 2
@@ -558,99 +621,169 @@ rubik_turn_done:
 # t1: permutation rank
 # t2: orientation code
 rubik_encode_state:
-    li t0, 0
-    li t1, 0
+    # Load the seven permutation elements once.
+    lbu t0, 0(a0)
+    lbu t1, 1(a0)
+    lbu t2, 2(a0)
+    lbu t3, 3(a0)
+    lbu t4, 4(a0)
+    lbu t5, 5(a0)
+    lbu t6, 6(a0)
 
-encode_perm_outer:
-    li t2, 7
-    bge t0, t2, encode_orientation
+    # Compute Lehmer rank using 21 fixed comparisons.
+    li a2, 0
 
-    # Read p[i].
-    add t3, a0, t0
-    lbu t4, 0(t3)
+    # Lehmer digit 0.
+    li a3, 0
+    sltu a1, t1, t0
+    add a3, a3, a1
+    sltu a1, t2, t0
+    add a3, a3, a1
+    sltu a1, t3, t0
+    add a3, a3, a1
+    sltu a1, t4, t0
+    add a3, a3, a1
+    sltu a1, t5, t0
+    add a3, a3, a1
+    sltu a1, t6, t0
+    add a3, a3, a1
+    mv a2, a3
 
-    # Count smaller entries to the right.
-    addi t5, t0, 1
-    li t6, 0
+    # Lehmer digit 1.
+    li a3, 0
+    sltu a1, t2, t1
+    add a3, a3, a1
+    sltu a1, t3, t1
+    add a3, a3, a1
+    sltu a1, t4, t1
+    add a3, a3, a1
+    sltu a1, t5, t1
+    add a3, a3, a1
+    sltu a1, t6, t1
+    add a3, a3, a1
+    slli a4, a2, 2
+    slli a1, a2, 1
+    add a2, a4, a1
+    add a2, a2, a3
 
-encode_perm_inner:
-    li a1, 7
-    bge t5, a1, encode_perm_update
+    # Lehmer digit 2.
+    li a3, 0
+    sltu a1, t3, t2
+    add a3, a3, a1
+    sltu a1, t4, t2
+    add a3, a3, a1
+    sltu a1, t5, t2
+    add a3, a3, a1
+    sltu a1, t6, t2
+    add a3, a3, a1
+    slli a4, a2, 2
+    add a2, a4, a2
+    add a2, a2, a3
 
-    add a2, a0, t5
-    lbu a3, 0(a2)
+    # Lehmer digit 3.
+    li a3, 0
+    sltu a1, t4, t3
+    add a3, a3, a1
+    sltu a1, t5, t3
+    add a3, a3, a1
+    sltu a1, t6, t3
+    add a3, a3, a1
+    slli a2, a2, 2
+    add a2, a2, a3
 
-    bgeu a3, t4, encode_perm_skip
-    addi t6, t6, 1
+    # Lehmer digit 4.
+    li a3, 0
+    sltu a1, t5, t4
+    add a3, a3, a1
+    sltu a1, t6, t4
+    add a3, a3, a1
+    slli a4, a2, 1
+    add a2, a4, a2
+    add a2, a2, a3
 
-encode_perm_skip:
-    addi t5, t5, 1
-    j encode_perm_inner
+    # Lehmer digit 5.
+    li a3, 0
+    sltu a1, t6, t5
+    add a3, a3, a1
+    slli a2, a2, 1
+    add a2, a2, a3
 
-encode_perm_update:
-    # rank = rank * (7 - i) + digit
-    # Repeated addition avoids RV32M multiply.
-    li a1, 7
-    sub a1, a1, t0
-    li a4, 0
+    # Compute orientation code from o[0..5].
+    addi a5, a0, 7
+    lbu a3, 0(a5)
+    slli a4, a3, 1
+    add a3, a3, a4
+    lbu a1, 1(a5)
+    add a3, a3, a1
+    slli a4, a3, 1
+    add a3, a3, a4
+    lbu a1, 2(a5)
+    add a3, a3, a1
+    slli a4, a3, 1
+    add a3, a3, a4
+    lbu a1, 3(a5)
+    add a3, a3, a1
+    slli a4, a3, 1
+    add a3, a3, a4
+    lbu a1, 4(a5)
+    add a3, a3, a1
+    slli a4, a3, 1
+    add a3, a3, a4
+    lbu a1, 5(a5)
+    add a3, a3, a1
 
-encode_perm_scale:
-    beq a1, zero, encode_perm_scaled
-    add a4, a4, t1
-    addi a1, a1, -1
-    j encode_perm_scale
-
-encode_perm_scaled:
-    add t1, a4, t6
-    addi t0, t0, 1
-    j encode_perm_outer
-
-encode_orientation:
-    # Read o[0] through o[5].
-    addi a1, a0, 7
-    li t0, 0
-    li t2, 0
-
-encode_ori_loop:
-    li t3, 6
-    bge t0, t3, encode_combine
-
-    # code = code * 3 + o[i]
-    slli t3, t2, 1
-    add t2, t3, t2
-
-    lbu t4, 0(a1)
-    add t2, t2, t4
-
-    addi a1, a1, 1
-    addi t0, t0, 1
-    j encode_ori_loop
-
-encode_combine:
-    # 729 = 512 + 128 + 64 + 16 + 8 + 1
-    # ID = permutation_rank * 729 + orientation
-
-    slli t3, t1, 9
-
-    slli t4, t1, 7
-    add t3, t3, t4
-
-    slli t4, t1, 6
-    add t3, t3, t4
-
-    slli t4, t1, 4
-    add t3, t3, t4
-
-    slli t4, t1, 3
-    add t3, t3, t4
-
-    add t3, t3, t1
-    add a0, t3, t2
-
+    # State ID = permutation rank * 729 + orientation.
+    slli a1, a2, 9
+    slli a4, a2, 7
+    add a1, a1, a4
+    slli a4, a2, 6
+    add a1, a1, a4
+    slli a4, a2, 4
+    add a1, a1, a4
+    slli a4, a2, 3
+    add a1, a1, a4
+    add a1, a1, a2
+    add a0, a1, a3
     ret
-
     .size rubik_encode_state, .-rubik_encode_state
 
+    .globl rubik_lookup_depth5_asm
+    .type rubik_lookup_depth5_asm, @function
+    .align 2
+
+# Search only the depth-5 lookup layer.
+# a0: State ID
+# return a0: 5 if found, -1 otherwise
+
+rubik_lookup_depth5_asm:
+    # Bitmap index = low 16 bits of State ID.
+    # Byte index = (State ID & 0xFFFF) >> 3.
+    slli t2, a0, 16
+    srli t2, t2, 19
+
+    # Bit index = State ID & 7.
+    andi t3, a0, 7
+    li t4, 1
+    sll t4, t4, t3
+
+    # Read the corresponding bitmap byte.
+    la t0, rubik_depth5_bitmap
+    add t0, t0, t2
+    lbu t5, 0(t0)
+
+    # Bit = 0 means definitely not in depth 5.
+    and t5, t5, t4
+    beqz t5, lookup_not_found
+
+    # Possible match: verify using binary search.
+    mv a6, a0
+    la t0, rubik_lookup_offsets
+    la t1, rubik_lookup_packed
+
+    li a5, 5
+    j lookup_next_layer
+
+    .size rubik_lookup_depth5_asm, .-rubik_lookup_depth5_asm
 
     .globl rubik_lookup_distance_asm
     .type rubik_lookup_distance_asm, @function
@@ -950,3 +1083,5 @@ rubik_move_names:
     .byte 68, 39, 0       # D'
 
     .include "src/rubik/rubik_lookup.inc"
+    .include "src/rubik/rubik_depth5_bitmap.inc"
+    .include "src/rubik/rubik_moves.inc"
