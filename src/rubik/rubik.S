@@ -130,6 +130,32 @@ rubik_mod3_done:
     bnez a3, rubik_invalid
     bnez t5, rubik_solved
 
+    # Encode the input cube at sp + 0.
+    mv a0, sp
+    call rubik_encode_state
+
+    # Check whether its distance is within 5.
+    call rubik_lookup_distance_asm
+
+    # Not in the table: use existing DFS.
+    blt a0, zero, rubik_start_search
+
+    # Save the shortest distance.
+    mv s2, a0
+
+    # Reconstruct move indices into path[] at sp + 80.
+    mv a2, a0
+    mv a0, sp
+    addi a1, sp, 80
+
+    call rubik_reconstruct_asm
+
+    # Defensive check: reconstruction must succeed.
+    blt a0, zero, rubik_start_search
+
+    # The original output formatter uses s2 as length.
+    j rubik_search_found
+
 # ------------------------------------------==
 # 3. Iterative Deepening
 # ------------------------------------------==
@@ -521,6 +547,382 @@ rubik_turn_done:
 
     .size rubik_turn_once, .-rubik_turn_once
 
+
+    .globl rubik_encode_state
+    .type rubik_encode_state, @function
+    .align 2
+
+# a0: pointer to 14-byte decoded cube
+# return a0: state ID
+# t0: position index
+# t1: permutation rank
+# t2: orientation code
+rubik_encode_state:
+    li t0, 0
+    li t1, 0
+
+encode_perm_outer:
+    li t2, 7
+    bge t0, t2, encode_orientation
+
+    # Read p[i].
+    add t3, a0, t0
+    lbu t4, 0(t3)
+
+    # Count smaller entries to the right.
+    addi t5, t0, 1
+    li t6, 0
+
+encode_perm_inner:
+    li a1, 7
+    bge t5, a1, encode_perm_update
+
+    add a2, a0, t5
+    lbu a3, 0(a2)
+
+    bgeu a3, t4, encode_perm_skip
+    addi t6, t6, 1
+
+encode_perm_skip:
+    addi t5, t5, 1
+    j encode_perm_inner
+
+encode_perm_update:
+    # rank = rank * (7 - i) + digit
+    # Repeated addition avoids RV32M multiply.
+    li a1, 7
+    sub a1, a1, t0
+    li a4, 0
+
+encode_perm_scale:
+    beq a1, zero, encode_perm_scaled
+    add a4, a4, t1
+    addi a1, a1, -1
+    j encode_perm_scale
+
+encode_perm_scaled:
+    add t1, a4, t6
+    addi t0, t0, 1
+    j encode_perm_outer
+
+encode_orientation:
+    # Read o[0] through o[5].
+    addi a1, a0, 7
+    li t0, 0
+    li t2, 0
+
+encode_ori_loop:
+    li t3, 6
+    bge t0, t3, encode_combine
+
+    # code = code * 3 + o[i]
+    slli t3, t2, 1
+    add t2, t3, t2
+
+    lbu t4, 0(a1)
+    add t2, t2, t4
+
+    addi a1, a1, 1
+    addi t0, t0, 1
+    j encode_ori_loop
+
+encode_combine:
+    # 729 = 512 + 128 + 64 + 16 + 8 + 1
+    # ID = permutation_rank * 729 + orientation
+
+    slli t3, t1, 9
+
+    slli t4, t1, 7
+    add t3, t3, t4
+
+    slli t4, t1, 6
+    add t3, t3, t4
+
+    slli t4, t1, 4
+    add t3, t3, t4
+
+    slli t4, t1, 3
+    add t3, t3, t4
+
+    add t3, t3, t1
+    add a0, t3, t2
+
+    ret
+
+    .size rubik_encode_state, .-rubik_encode_state
+
+
+    .globl rubik_lookup_distance_asm
+    .type rubik_lookup_distance_asm, @function
+    .align 2
+
+# a0: encoded state ID
+# return a0: distance 0..5, or -1 if absent
+#
+# a6: target ID
+# a5: current depth
+# t0: offsets base
+# t1: packed data base
+# t2: low index
+# t3: high index (exclusive)
+# t4: middle index
+# t5, t6, a1-a4: scratch registers
+rubik_lookup_distance_asm:
+    mv a6, a0
+
+    la t0, rubik_lookup_offsets
+    la t1, rubik_lookup_packed
+
+    li a5, 0
+
+lookup_next_layer:
+    li a1, 6
+    bge a5, a1, lookup_not_found
+
+    # low = offsets[depth]
+    # high = offsets[depth + 1]
+    slli a1, a5, 2
+    add a1, t0, a1
+
+    lw t2, 0(a1)
+    lw t3, 4(a1)
+
+lookup_binary_search:
+    # Empty search interval?
+    bge t2, t3, lookup_advance_layer
+
+    # mid = low + (high - low) / 2
+    sub t4, t3, t2
+    srli t4, t4, 1
+    add t4, t4, t2
+
+    # Address of packed[mid], each ID uses 3 bytes.
+    slli a1, t4, 1
+    add a1, a1, t4
+    add a1, t1, a1
+
+    # Decode 3-byte little-endian State ID.
+    lbu a2, 0(a1)
+    lbu a3, 1(a1)
+    lbu a4, 2(a1)
+
+    slli a3, a3, 8
+    slli a4, a4, 16
+
+    or a2, a2, a3
+    or a2, a2, a4
+
+    # Compare packed[mid] with the target ID.
+    beq a2, a6, lookup_found
+
+    bltu a2, a6, lookup_search_right
+
+    # packed[mid] > target:
+    # Search [low, mid)
+    mv t3, t4
+    j lookup_binary_search
+
+lookup_search_right:
+    # packed[mid] < target:
+    # Search [mid + 1, high)
+    addi t2, t4, 1
+    j lookup_binary_search
+
+lookup_advance_layer:
+    addi a5, a5, 1
+    j lookup_next_layer
+
+lookup_found:
+    mv a0, a5
+    ret
+
+lookup_not_found:
+    li a0, -1
+    ret
+
+    .size rubik_lookup_distance_asm, .-rubik_lookup_distance_asm
+
+
+    .globl rubik_reconstruct_asm
+    .type rubik_reconstruct_asm, @function
+    .align 2
+
+# a0 = pointer to decoded 14-byte cube
+# a1 = output path (move indices)
+# a2 = known lookup distance, 0..5
+#
+# Return a0 = number of moves, or -1 on failure.
+#
+# Local stack:
+#  0..13   current cube
+# 16..29   scratch A
+# 32..45   scratch B
+# 48..84   saved registers
+
+rubik_reconstruct_asm:
+    addi sp, sp, -96
+
+    sw ra, 48(sp)
+    sw s0, 52(sp)
+    sw s1, 56(sp)
+    sw s2, 60(sp)
+    sw s3, 64(sp)
+    sw s4, 68(sp)
+    sw s5, 72(sp)
+    sw s6, 76(sp)
+    sw s7, 80(sp)
+    sw s8, 84(sp)
+
+    mv s0, sp
+    mv s1, a1
+    mv s2, a2
+    li s3, 0
+
+    # Copy input cube to local current cube.
+    li t0, 0
+
+reconstruct_initial_copy:
+    li t1, 14
+    bge t0, t1, reconstruct_next_step
+
+    add t2, a0, t0
+    lbu t3, 0(t2)
+
+    add t2, s0, t0
+    sb t3, 0(t2)
+
+    addi t0, t0, 1
+    j reconstruct_initial_copy
+
+reconstruct_next_step:
+    # Stop when lookup distance reaches zero.
+    beqz s2, reconstruct_success
+
+    # Try move indices 0..8.
+    li s4, 0
+
+reconstruct_try_move:
+    li t0, 9
+    bge s4, t0, reconstruct_failure
+
+    # Decode move:
+    # 0..2 -> R
+    # 3..5 -> B
+    # 6..8 -> D
+    li s5, 0
+    mv s6, s4
+
+    li t0, 3
+    blt s6, t0, reconstruct_face_ready
+
+    addi s6, s6, -3
+    li s5, 1
+
+    li t0, 3
+    blt s6, t0, reconstruct_face_ready
+
+    addi s6, s6, -3
+    li s5, 2
+
+reconstruct_face_ready:
+    # Convert power index to turn count 1..3.
+    addi s6, s6, 1
+
+    # Source starts at current cube.
+    mv s7, s0
+
+    # First destination is scratch A.
+    addi s8, sp, 16
+
+reconstruct_turn_loop:
+    mv a0, s7
+    mv a1, s8
+    mv a2, s5
+
+    call rubik_turn_once
+
+    # The destination becomes the next source.
+    mv s7, s8
+
+    addi s6, s6, -1
+    beqz s6, reconstruct_evaluate
+
+    # Alternate scratch A and scratch B.
+    addi t0, sp, 16
+    beq s8, t0, reconstruct_use_b
+
+    addi s8, sp, 16
+    j reconstruct_turn_loop
+
+reconstruct_use_b:
+    addi s8, sp, 32
+    j reconstruct_turn_loop
+
+reconstruct_evaluate:
+    # Encode candidate cube.
+    mv a0, s7
+    call rubik_encode_state
+
+    # Find candidate's shortest distance.
+    call rubik_lookup_distance_asm
+
+    # Accept only a move that reduces distance by 1.
+    addi t0, s2, -1
+    bne a0, t0, reconstruct_reject
+
+    # Save accepted move index to path.
+    add t1, s1, s3
+    sb s4, 0(t1)
+
+    # Copy accepted candidate into current cube.
+    li t0, 0
+
+reconstruct_accept_copy:
+    li t1, 14
+    bge t0, t1, reconstruct_accept_done
+
+    add t2, s7, t0
+    lbu t3, 0(t2)
+
+    add t2, s0, t0
+    sb t3, 0(t2)
+
+    addi t0, t0, 1
+    j reconstruct_accept_copy
+
+reconstruct_accept_done:
+    addi s3, s3, 1
+    addi s2, s2, -1
+    j reconstruct_next_step
+
+reconstruct_reject:
+    addi s4, s4, 1
+    j reconstruct_try_move
+
+reconstruct_success:
+    mv a0, s3
+    j reconstruct_return
+
+reconstruct_failure:
+    li a0, -1
+
+reconstruct_return:
+    lw ra, 48(sp)
+    lw s0, 52(sp)
+    lw s1, 56(sp)
+    lw s2, 60(sp)
+    lw s3, 64(sp)
+    lw s4, 68(sp)
+    lw s5, 72(sp)
+    lw s6, 76(sp)
+    lw s7, 80(sp)
+    lw s8, 84(sp)
+
+    addi sp, sp, 96
+    ret
+
+    .size rubik_reconstruct_asm, .-rubik_reconstruct_asm
+
 # ===== Read-only tables =====
 
     .section .rodata
@@ -546,3 +948,5 @@ rubik_move_names:
     .byte 68, 0, 0        # D
     .byte 68, 50, 0       # D2
     .byte 68, 39, 0       # D'
+
+    .include "src/rubik/rubik_lookup.inc"
